@@ -40,6 +40,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_READER_APP_PRIVATE_KEY }}
           owner: sher-ing
           repositories: sher
+          permission-actions: read
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           github-token: ${{ steps.source-token.outputs.token }}
@@ -90,6 +91,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_PUBLISHER_APP_PRIVATE_KEY }}
           owner: sher-ing
           repositories: sher-releases
+          permission-contents: write
       - name: Read sealed identity
         id: manifest
         run: |
@@ -247,6 +249,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_PUBLISHER_APP_PRIVATE_KEY }}
           owner: sher-ing
           repositories: sher-releases
+          permission-contents: write
       - name: Final immutable-ID allowlist and digest check, then publish
         env:
           GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
