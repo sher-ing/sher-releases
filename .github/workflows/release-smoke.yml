@@ -1,0 +1,127 @@
+name: downloaded release smoke
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      release_id:
+        required: true
+        type: number
+      version:
+        required: true
+        type: string
+      channel:
+        required: true
+        type: string
+      source_commit:
+        required: true
+        type: string
+permissions: {}
+
+jobs:
+  native:
+    name: ${{ matrix.environment }} downloaded artifact
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: macOS Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - environment: macOS Apple Silicon
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - environment: Ubuntu 22.04 x86-64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - environment: Ubuntu 22.04 ARM64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Download and validate the exact draft archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release_smoke.py fetch \
+            --repository "${{ inputs.repository }}" \
+            --release-id "${{ inputs.release_id }}" \
+            --version "${{ inputs.version }}" \
+            --source-commit "${{ inputs.source_commit }}" \
+            --target "${{ matrix.target }}" \
+            --output "$RUNNER_TEMP/release-assets"
+      - name: Verify GitHub artifact attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "$RUNNER_TEMP/release-assets/sher-${{ matrix.target }}.tar.gz" --repo "${{ inputs.repository }}"
+      - name: Verify macOS ad hoc signature
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/release-assets/sher"
+          codesign --verify --deep --strict --verbose=2 "$binary"
+          codesign -dv --verbose=4 "$binary" 2> "$RUNNER_TEMP/codesign.txt"
+          grep -q '^Signature=adhoc$' "$RUNNER_TEMP/codesign.txt"
+      - name: Exercise installer, identity, TUI, daemon, and explicit update check
+        run: |
+          python3 scripts/release_smoke.py exercise \
+            --assets "$RUNNER_TEMP/release-assets" \
+            --version "${{ inputs.version }}" \
+            --channel "${{ inputs.channel }}" \
+            --source-commit "${{ inputs.source_commit }}" \
+            --target "${{ matrix.target }}"
+
+  arch:
+    name: Arch Linux x86-64 downloaded artifact
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Download and validate the exact draft archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release_smoke.py fetch \
+            --repository "${{ inputs.repository }}" \
+            --release-id "${{ inputs.release_id }}" \
+            --version "${{ inputs.version }}" \
+            --source-commit "${{ inputs.source_commit }}" \
+            --target x86_64-unknown-linux-gnu \
+            --output "$RUNNER_TEMP/release-assets"
+      - name: Verify GitHub artifact attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "$RUNNER_TEMP/release-assets/sher-x86_64-unknown-linux-gnu.tar.gz" --repo "${{ inputs.repository }}"
+      - name: Exercise the downloaded binary on current standard Arch
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e RELEASE_VERSION -e RELEASE_CHANNEL -e SOURCE_COMMIT \
+            -v "$GITHUB_WORKSPACE:/work:ro" \
+            -v "$RUNNER_TEMP/release-assets:/release-assets" \
+            archlinux:base \
+            sh -lc 'pacman -Syu --noconfirm python curl tar glibc util-linux && \
+              python /work/scripts/release_smoke.py exercise \
+                --assets /release-assets \
+                --version "$RELEASE_VERSION" \
+                --channel "$RELEASE_CHANNEL" \
+                --source-commit "$SOURCE_COMMIT" \
+                --target x86_64-unknown-linux-gnu'

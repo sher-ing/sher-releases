@@ -1,0 +1,266 @@
+# Install this file as .github/workflows/publish.yml in sher-ing/sher-releases.
+# It is the only workflow allowed to create, mutate, attest, or publish releases.
+name: publish sealed Sher release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        required: true
+        type: string
+      source_run_id:
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
+      bundle_digest:
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: sher-release-publisher
+  cancel-in-progress: false
+
+jobs:
+  acquire:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        id: source-token
+        with:
+          app-id: ${{ secrets.RELEASE_READER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_READER_APP_PRIVATE_KEY }}
+          owner: sher-ing
+          repositories: sher
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ steps.source-token.outputs.token }}
+          repository: ${{ inputs.source_repository }}
+          run-id: ${{ inputs.source_run_id }}
+          name: ${{ inputs.artifact_name }}
+          path: bundle
+      - name: Verify source handoff digest and sealed bundle
+        env:
+          EXPECTED_DIGEST: ${{ inputs.bundle_digest }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_DIGEST" = "$(cat bundle/bundle.sha256)"
+          python3 scripts/build_release_bundle.py verify --bundle bundle
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publisher-bundle-${{ github.run_id }}
+          path: bundle
+          if-no-files-found: error
+          retention-days: 30
+
+  draft:
+    needs: acquire
+    runs-on: ubuntu-22.04
+    environment: release-publisher
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      immutable_release_id: ${{ steps.release.outputs.immutable_release_id }}
+      channel: ${{ steps.manifest.outputs.channel }}
+      version: ${{ steps.manifest.outputs.version }}
+      source_commit: ${{ steps.manifest.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: publisher-bundle-${{ github.run_id }}
+          path: bundle
+      - uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        id: publisher-token
+        with:
+          app-id: ${{ secrets.RELEASE_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PUBLISHER_APP_PRIVATE_KEY }}
+          owner: sher-ing
+          repositories: sher-releases
+      - name: Read sealed identity
+        id: manifest
+        run: |
+          set -euo pipefail
+          echo "tag=$(jq -r .public_tag bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -r .version bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
+          echo "channel=$(jq -r .channel bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$(jq -r .source_commit bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Require immutable releases before reserving an identity
+        env:
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
+      - name: Reserve public provenance commit and protected tag
+        env:
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::public tag $TAG already exists; release identities cannot be rebuilt"
+            exit 1
+          fi
+          mkdir -p provenance
+          jq --arg bundle_sha256 "$(cat bundle/bundle.sha256)" \
+            '. + {sealed_bundle_sha256: $bundle_sha256}' \
+            bundle/provenance.json > "provenance/$TAG.json"
+          git config user.name sher-release-publisher[bot]
+          git config user.email 0+sher-release-publisher[bot]@users.noreply.github.com
+          git add "provenance/$TAG.json"
+          git commit -m "release: reserve $TAG"
+          git tag -a "$TAG" -m "Sher $TAG"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main "refs/tags/$TAG"
+      - name: Create sealed draft and upload closed asset set
+        id: release
+        env:
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+          CHANNEL: ${{ steps.manifest.outputs.channel }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [ "$CHANNEL" = dev ]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            "${prerelease[@]}" --title "Sher $TAG" --notes-file bundle/release-notes.md
+          mapfile -t assets < <(find bundle/assets -maxdepth 1 -type f -print | sort)
+          assets+=(bundle/asset-manifest.json bundle/provenance.json bundle/bundle.sha256)
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${assets[@]}"
+          release_id=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)
+          test "$release_id" -gt 0
+          echo "immutable_release_id=$release_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            bundle/assets/*
+            bundle/asset-manifest.json
+            bundle/provenance.json
+            bundle/bundle.sha256
+
+  verify-downloaded-draft:
+    needs: draft
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: publisher-bundle-${{ github.run_id }}
+          path: bundle
+      - name: Re-fetch every draft asset and verify bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/public_release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-id "${{ needs.draft.outputs.immutable_release_id }}" \
+            --bundle bundle \
+            --verify-draft
+
+  downloaded-runtime-smoke:
+    if: needs.draft.outputs.channel == 'stable'
+    needs: [draft, verify-downloaded-draft]
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/release-smoke.yml
+    with:
+      repository: ${{ github.repository }}
+      release_id: ${{ fromJSON(needs.draft.outputs.immutable_release_id) }}
+      version: ${{ needs.draft.outputs.version }}
+      channel: ${{ needs.draft.outputs.channel }}
+      source_commit: ${{ needs.draft.outputs.source_commit }}
+    secrets: inherit
+
+  maintainer-canary:
+    if: needs.draft.outputs.channel == 'stable'
+    needs: [draft, downloaded-runtime-smoke]
+    runs-on: ubuntu-22.04
+    environment: release-canary
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: publisher-bundle-${{ github.run_id }}
+          path: bundle
+      - name: Record protected maintainer canary and recheck its draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/public_release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-id "${{ needs.draft.outputs.immutable_release_id }}" \
+            --bundle bundle \
+            --verify-draft
+          echo "Maintainer approved authenticated draft canary for release ID ${{ needs.draft.outputs.immutable_release_id }}" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    if: >-
+      always() &&
+      needs.draft.result == 'success' &&
+      needs.verify-downloaded-draft.result == 'success' &&
+      ((needs.draft.outputs.channel == 'dev' &&
+        needs.downloaded-runtime-smoke.result == 'skipped' &&
+        needs.maintainer-canary.result == 'skipped') ||
+       (needs.draft.outputs.channel == 'stable' &&
+        needs.downloaded-runtime-smoke.result == 'success' &&
+        needs.maintainer-canary.result == 'success'))
+    needs: [draft, verify-downloaded-draft, downloaded-runtime-smoke, maintainer-canary]
+    runs-on: ubuntu-22.04
+    environment: release-publisher
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: publisher-bundle-${{ github.run_id }}
+          path: bundle
+      - uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        id: publisher-token
+        with:
+          app-id: ${{ secrets.RELEASE_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PUBLISHER_APP_PRIVATE_KEY }}
+          owner: sher-ing
+          repositories: sher-releases
+      - name: Final immutable-ID allowlist and digest check, then publish
+        env:
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
+        run: |
+          python3 scripts/public_release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-id "${{ needs.draft.outputs.immutable_release_id }}" \
+            --bundle bundle \
+            --publish
+          gh release verify "v${{ needs.draft.outputs.version }}" --repo "$GITHUB_REPOSITORY"
+          while IFS= read -r asset; do
+            gh release verify-asset "v${{ needs.draft.outputs.version }}" "$asset" \
+              --repo "$GITHUB_REPOSITORY"
+          done < <(
+            find bundle/assets -maxdepth 1 -type f -print
+            printf '%s\n' bundle/asset-manifest.json bundle/provenance.json bundle/bundle.sha256
+          )
