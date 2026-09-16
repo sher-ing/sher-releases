@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-22.04
     environment: release-publisher
     permissions:
-      contents: read
+      contents: write
       id-token: write
       attestations: write
     outputs:
@@ -123,7 +123,7 @@ jobs:
       - name: Create sealed draft and upload closed asset set
         id: release
         env:
-          GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.manifest.outputs.tag }}
           CHANNEL: ${{ steps.manifest.outputs.channel }}
         run: |
