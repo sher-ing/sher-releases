@@ -305,7 +305,7 @@ def exercise_update_check(binary: Path, env: dict[str, str], channel: str) -> No
     missing = [line for line in expected if line not in report]
     if missing:
         raise SmokeError(
-            "explicit update check did not produce its expected safe report "
+            "explicit update check did not produce its expected report "
             f"({', '.join(missing)}): {report}"
         )
 
