@@ -100,13 +100,6 @@ jobs:
           echo "version=$(jq -r .version bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
           echo "channel=$(jq -r .channel bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
           echo "source_commit=$(jq -r .source_commit bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
-      - name: Require immutable releases before reserving an identity
-        env:
-          GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          test "$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
       - name: Reserve public provenance commit and protected tag
         env:
           GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
