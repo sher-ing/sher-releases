@@ -42,7 +42,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
       attestations: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
       attestations: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

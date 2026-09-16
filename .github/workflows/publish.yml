@@ -17,6 +17,10 @@ on:
       bundle_digest:
         required: true
         type: string
+      resume_release_id:
+        description: Existing sealed draft release ID to resume after a publisher failure
+        required: false
+        type: string
 
 permissions: {}
 
@@ -85,6 +89,7 @@ jobs:
           name: publisher-bundle-${{ github.run_id }}
           path: bundle
       - uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        if: inputs.resume_release_id == ''
         id: publisher-token
         with:
           app-id: ${{ secrets.RELEASE_PUBLISHER_APP_ID }}
@@ -101,6 +106,7 @@ jobs:
           echo "channel=$(jq -r .channel bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
           echo "source_commit=$(jq -r .source_commit bundle/asset-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: Reserve public provenance commit and protected tag
+        if: inputs.resume_release_id == ''
         env:
           GH_TOKEN: ${{ steps.publisher-token.outputs.token }}
           TAG: ${{ steps.manifest.outputs.tag }}
@@ -121,7 +127,8 @@ jobs:
           git tag -a "$TAG" -m "Sher $TAG"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main "refs/tags/$TAG"
       - name: Create sealed draft and upload closed asset set
-        id: release
+        if: inputs.resume_release_id == ''
+        id: create-release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.manifest.outputs.tag }}
@@ -138,7 +145,37 @@ jobs:
           release_id=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)
           test "$release_id" -gt 0
           echo "immutable_release_id=$release_id" >> "$GITHUB_OUTPUT"
+      - name: Validate existing sealed draft identity
+        if: inputs.resume_release_id != ''
+        id: resume-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.resume_release_id }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+          CHANNEL: ${{ steps.manifest.outputs.channel }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          test "$(jq -r .id "$RUNNER_TEMP/release.json")" = "$RELEASE_ID"
+          test "$(jq -r .tag_name "$RUNNER_TEMP/release.json")" = "$TAG"
+          test "$(jq -r .draft "$RUNNER_TEMP/release.json")" = true
+          expected_prerelease=false
+          if [ "$CHANNEL" = dev ]; then expected_prerelease=true; fi
+          test "$(jq -r .prerelease "$RUNNER_TEMP/release.json")" = "$expected_prerelease"
+          echo "immutable_release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+      - name: Resolve immutable release ID
+        id: release
+        env:
+          CREATED_ID: ${{ steps.create-release.outputs.immutable_release_id }}
+          RESUMED_ID: ${{ steps.resume-release.outputs.immutable_release_id }}
+        run: |
+          set -euo pipefail
+          release_id="${CREATED_ID:-$RESUMED_ID}"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          echo "immutable_release_id=$release_id" >> "$GITHUB_OUTPUT"
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        if: inputs.resume_release_id == ''
         with:
           subject-path: |
             bundle/assets/*
@@ -150,7 +187,7 @@ jobs:
     needs: draft
     runs-on: ubuntu-22.04
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -173,7 +210,7 @@ jobs:
     if: needs.draft.outputs.channel == 'stable'
     needs: [draft, verify-downloaded-draft]
     permissions:
-      contents: read
+      contents: write
       attestations: read
     uses: ./.github/workflows/release-smoke.yml
     with:
@@ -190,7 +227,7 @@ jobs:
     runs-on: ubuntu-22.04
     environment: release-canary
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
