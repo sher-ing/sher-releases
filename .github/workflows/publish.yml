@@ -289,7 +289,16 @@ jobs:
             --release-id "${{ needs.draft.outputs.immutable_release_id }}" \
             --bundle bundle \
             --publish
-          gh release verify "v${{ needs.draft.outputs.version }}" --repo "$GITHUB_REPOSITORY"
+          for attempt in $(seq 1 12); do
+            if gh release verify "v${{ needs.draft.outputs.version }}" --repo "$GITHUB_REPOSITORY"; then
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              echo "::error::GitHub did not index the signed release attestation within 60 seconds"
+              exit 1
+            fi
+            sleep 5
+          done
           while IFS= read -r asset; do
             gh release verify-asset "v${{ needs.draft.outputs.version }}" "$asset" \
               --repo "$GITHUB_REPOSITORY"
