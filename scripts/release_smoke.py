@@ -310,7 +310,34 @@ def exercise_update_check(binary: Path, env: dict[str, str], channel: str) -> No
         )
 
 
+def host_registration() -> str | None:
+    """The machine's own Sher service registration, if any.
+
+    A temporary HOME does not isolate the per-user service manager: systemd and
+    launchd know the service by its fixed name, so `daemon install` and
+    `daemon uninstall` in the smoke environment act on the real registration.
+    """
+    if sys.platform == "darwin":
+        command = ["launchctl", "print", f"gui/{os.getuid()}/ing.sher.daemon"]
+    else:
+        command = ["systemctl", "--user", "cat", "sher-daemon.service"]
+    if shutil.which(command[0]) is None:
+        return None
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return None
+    return " ".join(command) if result.returncode == 0 else None
+
+
 def exercise(args: argparse.Namespace) -> None:
+    registration = host_registration()
+    if registration and not args.skip_registration:
+        raise SmokeError(
+            f"this machine has its own Sher service registration ({registration}); "
+            "the daemon install/uninstall checks would restart, stop and remove it. "
+            "Rerun with --skip-registration (CI runners cover those checks)."
+        )
     assets = args.assets.resolve()
     binary = assets / "sher"
     identity = json.loads(run([str(binary), "--version", "--json"], os.environ.copy()).stdout)
@@ -376,14 +403,17 @@ def exercise(args: argparse.Namespace) -> None:
         if "daemon: detached/manual" not in status:
             raise SmokeError(f"detached daemon did not report ownership: {status}")
         run([str(installed), "daemon", "stop"], env, timeout=30)
-        run([str(installed), "daemon", "install"], env, timeout=30)
-        registered = run([str(installed), "daemon", "status"], env).stdout
-        if "registration: none" in registered:
-            raise SmokeError("daemon install did not create a platform registration")
-        run([str(installed), "daemon", "uninstall"], env, timeout=30)
-        unregistered = run([str(installed), "daemon", "status"], env).stdout
-        if "registration: none" not in unregistered:
-            raise SmokeError("daemon uninstall left a registration behind")
+        if args.skip_registration:
+            print("release_smoke: skipped daemon install/uninstall checks", file=sys.stderr)
+        else:
+            run([str(installed), "daemon", "install"], env, timeout=30)
+            registered = run([str(installed), "daemon", "status"], env).stdout
+            if "registration: none" in registered:
+                raise SmokeError("daemon install did not create a platform registration")
+            run([str(installed), "daemon", "uninstall"], env, timeout=30)
+            unregistered = run([str(installed), "daemon", "status"], env).stdout
+            if "registration: none" not in unregistered:
+                raise SmokeError("daemon uninstall left a registration behind")
 
         exercise_update_check(installed, env, args.channel)
 
@@ -404,6 +434,11 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--channel", choices=("stable", "dev"), required=True)
     run_parser.add_argument("--source-commit", required=True)
     run_parser.add_argument("--target", choices=sorted(TARGETS), required=True)
+    run_parser.add_argument(
+        "--skip-registration",
+        action="store_true",
+        help="skip daemon install/uninstall on a machine with its own Sher service",
+    )
     return root
 
 
