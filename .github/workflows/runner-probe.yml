@@ -1,0 +1,14 @@
+name: Apple Silicon runner check
+on:
+  push:
+    branches: [check/macos-15-capacity]
+permissions: {}
+jobs:
+  runner:
+    runs-on: macos-15
+    timeout-minutes: 3
+    steps:
+      - name: Confirm native Apple Silicon
+        run: |
+          test "$(uname -m)" = arm64
+          sw_vers
