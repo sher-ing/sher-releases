@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "private_source_repository": "sher-ing/sher",
+  "private_source_commit": "b6029da39d5f0077277a20040a7d3177c5f61280",
+  "private_source_tag": "v0.4.5",
+  "public_distribution_tag": "v0.4.5",
+  "version": "0.4.5",
+  "channel": "stable",
+  "sealed_bundle_sha256": "090a054c4da919e1f23ceb7f5381e5b5184e848f51f0c7affd6179c71f71d0b2"
+}
